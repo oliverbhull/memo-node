@@ -148,9 +148,11 @@ impl Discovery {
     }
 
     pub fn shutdown(&self) -> Result<()> {
-        self.mdns
-            .shutdown()
-            .context("Failed to shutdown mDNS daemon")?;
+        // Shutdown the mDNS daemon
+        // Note: Internal errors from mdns_sd during shutdown (like "closed channel")
+        // are expected and can be safely ignored - they occur when the daemon
+        // is already shutting down or channels are closed
+        self.mdns.shutdown();
         Ok(())
     }
 }
