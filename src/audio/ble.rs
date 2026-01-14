@@ -146,7 +146,7 @@ impl BleAudioReceiver {
         }
 
         // Subscribe to audio notifications
-        self.subscribe_to_audio(peripheral.clone(), audio_char, &local_name)
+        self.subscribe_to_audio(&peripheral, audio_char, &local_name)
             .await?;
 
         // Subscribe to control TX notifications (button events)
@@ -222,7 +222,6 @@ impl BleAudioReceiver {
         info!("Subscribed to control events from {}", device_name);
 
         let is_recording = self.is_recording.clone();
-        let audio_tx = self.audio_tx.clone();
         let peripheral_clone = peripheral.clone();
         let characteristic_uuid = characteristic.uuid;
         let device_name = device_name.to_string();

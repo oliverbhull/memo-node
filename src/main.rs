@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
