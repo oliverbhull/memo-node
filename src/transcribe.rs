@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use memo_stt::SttEngine;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -9,13 +9,15 @@ pub struct WhisperTranscriber {
     engine: Arc<tokio::sync::Mutex<SttEngine>>,
     audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
     transcription_tx: mpsc::UnboundedSender<String>,
+    is_recording: Arc<AtomicBool>,
 }
 
 impl WhisperTranscriber {
     pub fn new(
         model_name: &str,
-        threads: u32,
+        threads: u8,
         audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
+        is_recording: Arc<AtomicBool>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<String>)> {
         let (transcription_tx, transcription_rx) = mpsc::unbounded_channel();
 
@@ -27,9 +29,9 @@ impl WhisperTranscriber {
 
         info!("Initializing Whisper engine with model: {} (configured for {} threads)", model_name, threads);
         info!("Model path: {:?}", model_path);
-        // Note: Thread count configuration is available but memo-stt currently uses
-        // a fixed thread count internally. This setting is reserved for future use
-        // or if memo-stt adds thread configuration support.
+        // Note: Thread count is optimized automatically by memo-stt based on CPU cores
+        // The configured thread count is logged for reference but memo-stt will use
+        // optimal thread count (min of CPU cores or 8) for best performance
 
         // Create memo-stt engine
         // memo-stt handles model downloading automatically
@@ -47,6 +49,7 @@ impl WhisperTranscriber {
                 engine: Arc::new(tokio::sync::Mutex::new(engine)),
                 audio_rx,
                 transcription_tx,
+                is_recording,
             },
             transcription_rx,
         ))
@@ -55,35 +58,104 @@ impl WhisperTranscriber {
     pub async fn start(mut self) -> Result<()> {
         info!("Starting Whisper transcriber");
 
-        // Buffer to accumulate audio samples
+        // Buffer to accumulate audio samples for the full recording
         let mut audio_buffer: Vec<i16> = Vec::new();
-        let min_duration_samples = 16000 * 2; // 2 seconds at 16kHz
+        let mut was_recording = self.is_recording.load(Ordering::Acquire);
 
-        while let Some(audio_chunk) = self.audio_rx.recv().await {
-            debug!("Received audio chunk: {} samples", audio_chunk.len());
+        loop {
+            // Receive audio chunks (with timeout to allow periodic recording state checks)
+            tokio::select! {
+                audio_chunk = self.audio_rx.recv() => {
+                    match audio_chunk {
+                        Some(chunk) => {
+                            let is_recording_now = self.is_recording.load(Ordering::Acquire);
+                            
+                            // If recording just stopped, transcribe the accumulated audio
+                            if was_recording && !is_recording_now && !audio_buffer.is_empty() {
+                                info!("Recording stopped, transcribing {} samples", audio_buffer.len());
+                                
+                                match self.transcribe_audio(&audio_buffer).await {
+                                    Ok(text) => {
+                                        if !text.trim().is_empty() {
+                                            info!("Transcribed: {}", text);
+                                            if let Err(e) = self.transcription_tx.send(text) {
+                                                error!("Failed to send transcription: {}", e);
+                                            }
+                                        } else {
+                                            debug!("Transcription returned empty text");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Transcription failed: {}", e);
+                                    }
+                                }
 
-            audio_buffer.extend_from_slice(&audio_chunk);
-
-            // Once we have enough audio, transcribe
-            if audio_buffer.len() >= min_duration_samples {
-                match self.transcribe_audio(&audio_buffer).await {
-                    Ok(text) => {
-                        if !text.trim().is_empty() {
-                            info!("Transcribed: {}", text);
-                            if let Err(e) = self.transcription_tx.send(text) {
-                                error!("Failed to send transcription: {}", e);
+                                // Clear buffer after transcription
+                                audio_buffer.clear();
                             }
-                        } else {
-                            debug!("Transcription returned empty text");
+
+                            // Only accumulate audio while recording
+                            if is_recording_now {
+                                debug!("Received audio chunk: {} samples", chunk.len());
+                                audio_buffer.extend_from_slice(&chunk);
+                            }
+                            
+                            was_recording = is_recording_now;
+                        }
+                        None => {
+                            // Channel closed, check if we need to transcribe final buffer
+                            let is_recording_now = self.is_recording.load(Ordering::Acquire);
+                            if was_recording && !is_recording_now && !audio_buffer.is_empty() {
+                                info!("Channel closed, transcribing final {} samples", audio_buffer.len());
+                                
+                                match self.transcribe_audio(&audio_buffer).await {
+                                    Ok(text) => {
+                                        if !text.trim().is_empty() {
+                                            info!("Transcribed: {}", text);
+                                            if let Err(e) = self.transcription_tx.send(text) {
+                                                error!("Failed to send transcription: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Transcription failed: {}", e);
+                                    }
+                                }
+                            }
+                            break;
                         }
                     }
-                    Err(e) => {
-                        error!("Transcription failed: {}", e);
-                    }
                 }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Periodic check for recording state changes
+                    let is_recording_now = self.is_recording.load(Ordering::Acquire);
+                    
+                    // If recording just stopped, transcribe the accumulated audio
+                    if was_recording && !is_recording_now && !audio_buffer.is_empty() {
+                        info!("Recording stopped (periodic check), transcribing {} samples", audio_buffer.len());
+                        
+                        match self.transcribe_audio(&audio_buffer).await {
+                            Ok(text) => {
+                                if !text.trim().is_empty() {
+                                    info!("Transcribed: {}", text);
+                                    if let Err(e) = self.transcription_tx.send(text) {
+                                        error!("Failed to send transcription: {}", e);
+                                    }
+                                } else {
+                                    debug!("Transcription returned empty text");
+                                }
+                            }
+                            Err(e) => {
+                                error!("Transcription failed: {}", e);
+                            }
+                        }
 
-                // Clear buffer after transcription
-                audio_buffer.clear();
+                        // Clear buffer after transcription
+                        audio_buffer.clear();
+                    }
+                    
+                    was_recording = is_recording_now;
+                }
             }
         }
 

@@ -214,10 +214,12 @@ async fn start_daemon() -> Result<()> {
     });
 
     // Initialize transcriber
+    let is_recording_transcriber = is_recording.clone();
     let (transcriber, mut transcription_rx) = WhisperTranscriber::new(
         &config.transcription.model,
         config.transcription.threads,
         decoded_rx,
+        is_recording_transcriber,
     )?;
 
     tokio::spawn(async move {

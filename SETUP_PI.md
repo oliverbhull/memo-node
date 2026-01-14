@@ -204,6 +204,51 @@ nano ~/.config/memo-node/config.toml
 
 3. **Check the webhook site** to see if transcriptions are being posted
 
+## Hailo AI Hat Acceleration (Experimental)
+
+The Raspberry Pi 5 with Hailo AI Hat (26 TOPS) can potentially accelerate Whisper transcription, but requires additional setup:
+
+### Current Status
+
+- **Whisper.cpp** (used by memo-stt) supports ACCEL backends that can auto-detect accelerators
+- **Hailo AI Hat** integration requires:
+  1. Hailo drivers and SDK installed on the Pi
+  2. whisper.cpp compiled with ACCEL backend support
+  3. Custom integration work to expose Hailo as an ACCEL device
+
+### Enabling GPU/ACCEL Auto-Detection
+
+The current implementation enables `use_gpu = true` in WhisperContextParameters, which allows whisper.cpp to:
+- Auto-detect GPU backends (Metal, CUDA, Vulkan, OpenCL)
+- Auto-detect ACCEL backends (like Hailo if properly configured)
+
+### To Enable Hailo Acceleration (Future Work)
+
+1. **Install Hailo SDK**:
+   ```bash
+   # Follow Hailo's official documentation for Raspberry Pi AI Kit setup
+   # This typically involves installing drivers and runtime libraries
+   ```
+
+2. **Verify Hailo Detection**:
+   ```bash
+   # Check if Hailo device is detected
+   ls /dev/hailo*
+   ```
+
+3. **Rebuild whisper-rs with ACCEL support**:
+   - This may require modifying whisper-rs build configuration
+   - Or using a fork that supports Hailo
+
+### Current Optimization
+
+For now, the best performance improvements come from:
+- Using `base.en` model (smaller, faster)
+- Optimized thread count (auto-detected from CPU cores)
+- CPU optimizations (enabled by default in release builds)
+
+**Note**: Hailo acceleration is experimental and requires significant integration work. The current CPU-based implementation should work well for real-time transcription with the `base.en` model.
+
 ## Troubleshooting
 
 ### BLE Connection Issues

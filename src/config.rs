@@ -27,10 +27,10 @@ pub struct AudioConfig {
 pub struct TranscriptionConfig {
     pub model: String,
     #[serde(default = "default_threads")]
-    pub threads: u32,
+    pub threads: u8,
 }
 
-fn default_threads() -> u32 {
+fn default_threads() -> u8 {
     4
 }
 
