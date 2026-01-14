@@ -1,0 +1,32 @@
+# Default configuration for memo-node
+
+[node]
+# Unique identifier for this node (override per machine)
+id = "memo-node"
+
+[audio]
+# BLE service UUID for Memo devices
+# TODO: Replace with actual Memo device UUID
+memo_service_uuid = "00000000-0000-0000-0000-000000000000"
+memo_characteristic_uuid = "00000000-0000-0000-0000-000000000001"
+
+[transcription]
+# Whisper model size: tiny.en, base.en, small.en, medium.en, large
+# Use tiny.en or base.en for Raspberry Pi, base.en or small.en for MacBook
+model = "base.en"
+
+[storage]
+# Storage path (use ~ for home directory, will be expanded)
+path = "~/.memo/transcriptions.db"
+
+[sync]
+# gRPC port for peer-to-peer sync
+grpc_port = 9876
+# Sync interval in seconds
+sync_interval = 30
+
+[api]
+# WebSocket port for memo-desktop connection
+websocket_port = 9877
+# Listen address
+listen_address = "127.0.0.1"

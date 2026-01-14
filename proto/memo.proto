@@ -1,0 +1,38 @@
+syntax = "proto3";
+package memo;
+
+service MemoSync {
+  // Health check
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Get transcriptions since a timestamp
+  rpc GetTranscriptionsSince(SinceRequest) returns (stream Transcription);
+
+  // Push new transcriptions
+  rpc PushTranscriptions(stream Transcription) returns (PushResponse);
+}
+
+message PingRequest {
+  string node_id = 1;
+}
+
+message PingResponse {
+  string node_id = 1;
+  int64 timestamp = 2;
+}
+
+message SinceRequest {
+  int64 since_timestamp = 1;
+}
+
+message Transcription {
+  string id = 1;
+  int64 timestamp = 2;
+  string text = 3;
+  string source_node = 4;
+  string memo_device_id = 5;
+}
+
+message PushResponse {
+  int32 received = 1;
+}
