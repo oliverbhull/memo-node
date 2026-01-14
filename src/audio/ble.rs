@@ -4,7 +4,8 @@ use btleplug::api::{
 };
 use btleplug::platform::{Manager, Peripheral};
 use futures_util::StreamExt;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::collections::HashSet;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -26,6 +27,7 @@ pub struct BleAudioReceiver {
     characteristic_uuid: Uuid,
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     is_recording: Arc<AtomicBool>,
+    connected_devices: Arc<Mutex<HashSet<String>>>, // Track connected device names
 }
 
 impl BleAudioReceiver {
@@ -42,6 +44,7 @@ impl BleAudioReceiver {
                 characteristic_uuid,
                 audio_tx,
                 is_recording: is_recording.clone(),
+                connected_devices: Arc::new(Mutex::new(HashSet::new())),
             },
             audio_rx,
             is_recording,
@@ -101,10 +104,20 @@ impl BleAudioReceiver {
             return Ok(());
         }
 
+        // Check if we're already connected and set up for this device
+        {
+            let mut connected = self.connected_devices.lock().unwrap();
+            if connected.contains(&local_name) {
+                // Already connected and set up, skip
+                return Ok(());
+            }
+        }
+
         info!("Found Memo device: {}", local_name);
 
         // Connect to the device
-        if !peripheral.is_connected().await? {
+        let was_connected = peripheral.is_connected().await?;
+        if !was_connected {
             peripheral
                 .connect()
                 .await
@@ -165,6 +178,12 @@ impl BleAudioReceiver {
                 info!("START_RECORDING command sent to {}", local_name);
                 self.is_recording.store(true, Ordering::Release);
             }
+        }
+
+        // Mark this device as connected and set up
+        {
+            let mut connected = self.connected_devices.lock().unwrap();
+            connected.insert(local_name.clone());
         }
 
         Ok(())
@@ -235,17 +254,33 @@ impl BleAudioReceiver {
                 }
             };
 
+            // Track last control value to avoid duplicate processing
+            let mut last_control_value: Option<u8> = None;
+            
             while let Some(data) = notification_stream.next().await {
                 if data.uuid == characteristic_uuid && !data.value.is_empty() {
                     let control_value = data.value[0];
+                    
+                    // Skip if we just processed this value (debounce duplicates)
+                    if last_control_value == Some(control_value) {
+                        continue;
+                    }
+                    last_control_value = Some(control_value);
+                    
                     match control_value {
                         RESP_SPEECH_START => {
-                            info!("Button pressed - starting recording on {}", device_name);
-                            is_recording.store(true, Ordering::Release);
+                            let current = is_recording.load(Ordering::Acquire);
+                            if !current {
+                                info!("Button pressed - starting recording on {}", device_name);
+                                is_recording.store(true, Ordering::Release);
+                            }
                         }
                         RESP_SPEECH_END => {
-                            info!("Button pressed again - stopping recording on {}", device_name);
-                            is_recording.store(false, Ordering::Release);
+                            let current = is_recording.load(Ordering::Acquire);
+                            if current {
+                                info!("Button pressed again - stopping recording on {}", device_name);
+                                is_recording.store(false, Ordering::Release);
+                            }
                         }
                         _ => {
                             debug!("Received control event: 0x{:02X} from {}", control_value, device_name);
