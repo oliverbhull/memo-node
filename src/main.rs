@@ -246,10 +246,11 @@ async fn start_daemon() -> Result<()> {
                 let _ = ws_broadcast_tx_clone2.send(transcription.clone());
 
                 // Post to HTTPS endpoint if configured
-                if let Some(ref client) = http_client_clone {
+                if let Some(client) = &http_client_clone {
                     let transcription_clone = transcription.clone();
+                    let client_clone = client.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = client
+                        if let Err(e) = client_clone
                             .post_transcription(
                                 &transcription_clone.id,
                                 transcription_clone.timestamp,

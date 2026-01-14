@@ -95,7 +95,7 @@ impl WhisperTranscriber {
 
         // memo-stt expects i16 samples directly, no conversion needed
         // It handles normalization internally
-        let engine = self.engine.lock().await;
+        let mut engine = self.engine.lock().await;
         
         engine.transcribe(audio)
             .map_err(|e| anyhow::anyhow!("Transcription error: {}", e))

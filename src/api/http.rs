@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 /// HTTP client for posting transcriptions to HTTPS endpoint
 pub struct HttpClient {
