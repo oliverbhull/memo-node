@@ -25,18 +25,34 @@ impl OpusDecoder {
         // Memo device sends bundles: [bundle_index:1][num_frames:1][frame1_size:1][frame1_data:N]...
         // Skip bundle_index (first byte) and parse bundle
         if encoded.len() < 2 {
+            tracing::debug!("Packet too short: {} bytes", encoded.len());
             return Ok(Vec::new()); // Not enough data for a bundle
         }
 
+        let bundle_index = encoded[0];
         let bundle_data = &encoded[1..]; // Skip bundle_index
+        
+        if bundle_data.is_empty() {
+            return Ok(Vec::new());
+        }
+        
         let num_frames = bundle_data[0] as usize;
+        
+        // Sanity check - reasonable number of frames
+        if num_frames == 0 || num_frames > 10 {
+            tracing::debug!("Invalid frame count: {} (bundle_index: {}, total_len: {})", 
+                num_frames, bundle_index, encoded.len());
+            return Ok(Vec::new());
+        }
         
         let mut all_samples = Vec::new();
         let mut offset = 1; // Skip frame count byte
 
         // Decode each frame in the bundle
-        for _ in 0..num_frames {
+        for frame_idx in 0..num_frames {
             if offset >= bundle_data.len() {
+                tracing::debug!("Bundle truncated at frame {} (offset: {}, len: {})", 
+                    frame_idx, offset, bundle_data.len());
                 break; // Bundle truncated
             }
 
@@ -44,7 +60,14 @@ impl OpusDecoder {
             let frame_size = bundle_data[offset] as usize;
             offset += 1;
 
+            if frame_size == 0 {
+                tracing::debug!("Zero-size frame at index {}", frame_idx);
+                continue; // Skip zero-size frames
+            }
+
             if offset + frame_size > bundle_data.len() {
+                tracing::debug!("Frame {} size {} exceeds bundle data (offset: {}, len: {})", 
+                    frame_idx, frame_size, offset, bundle_data.len());
                 break; // Frame size exceeds available data
             }
 
@@ -59,12 +82,17 @@ impl OpusDecoder {
 
             match self.decoder.decode(frame_data, &mut output, false) {
                 Ok(len) => {
-                    output.truncate(len);
-                    all_samples.extend_from_slice(&output);
+                    if len > 0 {
+                        output.truncate(len);
+                        all_samples.extend_from_slice(&output);
+                    }
                 }
                 Err(e) => {
-                    // Log but continue - some frames may fail
-                    tracing::debug!("Failed to decode Opus frame: {}", e);
+                    // Only log occasionally to avoid spam
+                    if frame_idx == 0 && num_frames > 0 {
+                        tracing::debug!("Failed to decode Opus frame {} (size: {}): {}", 
+                            frame_idx, frame_size, e);
+                    }
                 }
             }
 
