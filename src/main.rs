@@ -175,7 +175,7 @@ async fn start_daemon() -> Result<()> {
         .parse()
         .context("Invalid characteristic UUID")?;
 
-    let (ble_receiver, mut audio_rx) = BleAudioReceiver::new(service_uuid, char_uuid);
+    let (ble_receiver, mut audio_rx, is_recording) = BleAudioReceiver::new(service_uuid, char_uuid);
     let ble_receiver = Arc::new(ble_receiver);
 
     tokio::spawn(async move {
@@ -186,18 +186,27 @@ async fn start_daemon() -> Result<()> {
 
     // Initialize audio decoder
     let (decoded_tx, decoded_rx) = mpsc::unbounded_channel();
+    let is_recording_decoder = is_recording.clone();
     tokio::spawn(async move {
         let mut decoder = OpusDecoder::new(16000, opus::Channels::Mono).unwrap();
 
         while let Some(encoded_audio) = audio_rx.recv().await {
+            // Only decode if we're recording
+            if !is_recording_decoder.load(Ordering::Acquire) {
+                continue;
+            }
+
             match decoder.decode(&encoded_audio) {
                 Ok(decoded) => {
-                    if let Err(e) = decoded_tx.send(decoded) {
-                        error!("Failed to send decoded audio: {}", e);
+                    if !decoded.is_empty() {
+                        if let Err(e) = decoded_tx.send(decoded) {
+                            error!("Failed to send decoded audio: {}", e);
+                        }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to decode audio: {}", e);
+                    // Only log decode errors at debug level to reduce noise
+                    debug!("Failed to decode audio: {}", e);
                 }
             }
         }

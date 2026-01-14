@@ -1,34 +1,50 @@
 use anyhow::{Context, Result};
 use btleplug::api::{
-    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter,
+    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
 use btleplug::platform::{Manager, Peripheral};
 use futures_util::StreamExt;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+// Control characteristic UUIDs (from memo-stt)
+const CONTROL_TX_UUID: &str = "1234A003-1234-5678-1234-56789ABCDEF0";
+const CONTROL_RX_UUID: &str = "1234A002-1234-5678-1234-56789ABCDEF0";
+
+// Control response values from device
+const RESP_SPEECH_START: u8 = 0x01;  // Button pressed - start recording
+const RESP_SPEECH_END: u8 = 0x02;    // Button pressed again - stop recording
+
+// Control commands to device
+const CMD_START_RECORDING: u8 = 10;
+const CMD_END_RECORDING: u8 = 12;
 
 pub struct BleAudioReceiver {
     service_uuid: Uuid,
     characteristic_uuid: Uuid,
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
+    is_recording: Arc<AtomicBool>,
 }
 
 impl BleAudioReceiver {
     pub fn new(
         service_uuid: Uuid,
         characteristic_uuid: Uuid,
-    ) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+    ) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>, Arc<AtomicBool>) {
         let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let is_recording = Arc::new(AtomicBool::new(true)); // Start recording by default
 
         (
             Self {
                 service_uuid,
                 characteristic_uuid,
                 audio_tx,
+                is_recording: is_recording.clone(),
             },
             audio_rx,
+            is_recording,
         )
     }
 
@@ -102,18 +118,54 @@ impl BleAudioReceiver {
             .await
             .context("Failed to discover services")?;
 
-        // Find our characteristic
+        // Find characteristics
         let characteristics = peripheral.characteristics();
         let audio_char = characteristics
             .iter()
             .find(|c| c.uuid == self.characteristic_uuid)
             .context("Audio characteristic not found")?;
 
-        info!("Found audio characteristic on {}", local_name);
+        let control_tx_uuid = Uuid::parse_str(CONTROL_TX_UUID)
+            .context("Failed to parse control TX UUID")?;
+        let control_rx_uuid = Uuid::parse_str(CONTROL_RX_UUID)
+            .context("Failed to parse control RX UUID")?;
 
-        // Subscribe to notifications
-        self.subscribe_to_audio(peripheral, audio_char, &local_name)
+        let control_tx_char = characteristics
+            .iter()
+            .find(|c| c.uuid == control_tx_uuid);
+        let control_rx_char = characteristics
+            .iter()
+            .find(|c| c.uuid == control_rx_uuid);
+
+        info!("Found audio characteristic on {}", local_name);
+        if control_tx_char.is_some() {
+            info!("Found control TX characteristic on {}", local_name);
+        }
+        if control_rx_char.is_some() {
+            info!("Found control RX characteristic on {}", local_name);
+        }
+
+        // Subscribe to audio notifications
+        self.subscribe_to_audio(peripheral.clone(), audio_char, &local_name)
             .await?;
+
+        // Subscribe to control TX notifications (button events)
+        if let Some(control_tx) = control_tx_char {
+            self.subscribe_to_control(peripheral.clone(), control_tx, &local_name)
+                .await?;
+        }
+
+        // Send START command to begin recording (if control RX is available)
+        if let Some(control_rx) = control_rx_char {
+            info!("Sending START_RECORDING command to {}", local_name);
+            let start_cmd = vec![CMD_START_RECORDING];
+            if let Err(e) = peripheral.write(control_rx, &start_cmd, WriteType::WithoutResponse).await {
+                warn!("Failed to send START command: {}", e);
+            } else {
+                info!("START_RECORDING command sent to {}", local_name);
+                self.is_recording.store(true, Ordering::Release);
+            }
+        }
 
         Ok(())
     }
@@ -151,6 +203,59 @@ impl BleAudioReceiver {
             }
 
             warn!("Audio notification stream ended for {}", device_name);
+        });
+
+        Ok(())
+    }
+
+    async fn subscribe_to_control(
+        &self,
+        peripheral: Peripheral,
+        characteristic: &Characteristic,
+        device_name: &str,
+    ) -> Result<()> {
+        peripheral
+            .subscribe(characteristic)
+            .await
+            .context("Failed to subscribe to control characteristic")?;
+
+        info!("Subscribed to control events from {}", device_name);
+
+        let is_recording = self.is_recording.clone();
+        let audio_tx = self.audio_tx.clone();
+        let peripheral_clone = peripheral.clone();
+        let characteristic_uuid = characteristic.uuid;
+        let device_name = device_name.to_string();
+
+        tokio::spawn(async move {
+            let mut notification_stream = match peripheral_clone.notifications().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to get notification stream for control: {}", e);
+                    return;
+                }
+            };
+
+            while let Some(data) = notification_stream.next().await {
+                if data.uuid == characteristic_uuid && !data.value.is_empty() {
+                    let control_value = data.value[0];
+                    match control_value {
+                        RESP_SPEECH_START => {
+                            info!("Button pressed - starting recording on {}", device_name);
+                            is_recording.store(true, Ordering::Release);
+                        }
+                        RESP_SPEECH_END => {
+                            info!("Button pressed again - stopping recording on {}", device_name);
+                            is_recording.store(false, Ordering::Release);
+                        }
+                        _ => {
+                            debug!("Received control event: 0x{:02X} from {}", control_value, device_name);
+                        }
+                    }
+                }
+            }
+
+            warn!("Control notification stream ended for {}", device_name);
         });
 
         Ok(())
