@@ -22,8 +22,8 @@ mdns-sd = "0.10"
 # BLE
 btleplug = "0.11"
 
-# Audio decoding
-opus = "0.3"
+# Audio decoding (use audiopus like memo-stt for correct bundle decoding)
+audiopus = "0.2"
 
 # Speech-to-text
 memo-stt = { path = "../memo-stt" }

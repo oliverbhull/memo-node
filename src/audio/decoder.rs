@@ -1,19 +1,31 @@
 use anyhow::{Context, Result};
-use opus::{Channels, Decoder};
+use audiopus::{coder::Decoder, Channels, SampleRate};
 
 pub struct OpusDecoder {
     decoder: Decoder,
     sample_rate: u32,
+    frame_size_samples: usize,
 }
 
 impl OpusDecoder {
     pub fn new(sample_rate: u32, channels: Channels) -> Result<Self> {
-        let decoder =
-            Decoder::new(sample_rate, channels).context("Failed to create Opus decoder")?;
+        if sample_rate != 16000 {
+            anyhow::bail!("Opus decoder only supports 16kHz");
+        }
+        
+        let frame_duration_ms = 20; // 20ms frames
+        let frame_size_samples = (sample_rate * frame_duration_ms / 1000) as usize;
+        
+        // Create Opus decoder (mono, 16kHz)
+        let decoder = Decoder::new(
+            SampleRate::Hz16000,
+            channels,
+        ).context("Failed to create Opus decoder")?;
 
         Ok(Self {
             decoder,
             sample_rate,
+            frame_size_samples,
         })
     }
 
@@ -74,17 +86,14 @@ impl OpusDecoder {
             // Extract frame data
             let frame_data = &bundle_data[offset..offset + frame_size];
             
-            // Decode this frame
-            // Opus frames are typically 2.5, 5, 10, 20, 40 or 60 ms
-            // For 16kHz, 20ms = 320 samples
-            let frame_size_samples = (self.sample_rate / 50) as usize; // 20ms frame
-            let mut output = vec![0i16; frame_size_samples];
-
-            match self.decoder.decode(frame_data, &mut output, false) {
-                Ok(len) => {
-                    if len > 0 {
-                        output.truncate(len);
-                        all_samples.extend_from_slice(&output);
+            // Decode this frame using audiopus (same as memo-stt)
+            let mut pcm = vec![0i16; self.frame_size_samples];
+            
+            match self.decoder.decode(Some(frame_data), &mut pcm, false) {
+                Ok(samples_decoded) => {
+                    if samples_decoded > 0 {
+                        pcm.truncate(samples_decoded);
+                        all_samples.extend_from_slice(&pcm);
                     }
                 }
                 Err(e) => {
@@ -115,5 +124,12 @@ mod tests {
     fn test_opus_decoder_creation() {
         let decoder = OpusDecoder::new(16000, Channels::Mono);
         assert!(decoder.is_ok());
+    }
+    
+    #[test]
+    fn test_frame_size() {
+        let decoder = OpusDecoder::new(16000, Channels::Mono).unwrap();
+        // 20ms at 16kHz = 320 samples
+        assert_eq!(decoder.frame_size_samples, 320);
     }
 }

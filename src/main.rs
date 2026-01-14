@@ -189,7 +189,7 @@ async fn start_daemon() -> Result<()> {
     let (decoded_tx, decoded_rx) = mpsc::unbounded_channel();
     let is_recording_decoder = is_recording.clone();
     tokio::spawn(async move {
-        let mut decoder = OpusDecoder::new(16000, opus::Channels::Mono).unwrap();
+        let mut decoder = OpusDecoder::new(16000, audiopus::Channels::Mono).unwrap();
 
         while let Some(encoded_audio) = audio_rx.recv().await {
             // Only decode if we're recording
