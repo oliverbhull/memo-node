@@ -14,12 +14,13 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
-use api::WebSocketServer;
+use api::{HttpClient, WebSocketServer};
 use audio::{BleAudioReceiver, OpusDecoder};
 use config::Config;
 use storage::{Storage, Transcription};
 use sync::{Discovery, PeerManager, PeerSyncServer};
 use transcribe::WhisperTranscriber;
+use tracing::warn;
 
 #[derive(Parser)]
 #[command(name = "memo-node")]
@@ -74,6 +75,26 @@ async fn start_daemon() -> Result<()> {
     let storage_path = config.storage_path()?;
     let storage = Storage::new(&storage_path)?;
     info!("Storage initialized at {}", storage_path.display());
+
+    // Initialize HTTP client if endpoint is configured
+    let http_client: Option<Arc<HttpClient>> = if let Some(ref endpoint) = config.api.https_endpoint {
+        if endpoint.is_empty() {
+            None
+        } else {
+            match HttpClient::new(endpoint.clone()) {
+                Ok(client) => {
+                    info!("HTTP client initialized for endpoint: {}", endpoint);
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize HTTP client: {}. HTTPS posting will be disabled.", e);
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     // Create channels for new transcriptions
     let (transcription_tx, transcription_rx) = mpsc::unbounded_channel::<Transcription>();
@@ -183,8 +204,11 @@ async fn start_daemon() -> Result<()> {
     });
 
     // Initialize transcriber
-    let (transcriber, mut transcription_rx) =
-        WhisperTranscriber::new(&config.transcription.model, decoded_rx);
+    let (transcriber, mut transcription_rx) = WhisperTranscriber::new(
+        &config.transcription.model,
+        config.transcription.threads,
+        decoded_rx,
+    )?;
 
     tokio::spawn(async move {
         if let Err(e) = transcriber.start().await {
@@ -196,6 +220,7 @@ async fn start_daemon() -> Result<()> {
     let node_id = config.node.id.clone();
     let storage_clone = storage.clone();
     let ws_broadcast_tx_clone2 = ws_broadcast_tx.clone();
+    let http_client_clone = http_client.clone();
 
     tokio::spawn(async move {
         while let Some(text) = transcription_rx.recv().await {
@@ -207,17 +232,38 @@ async fn start_daemon() -> Result<()> {
             let transcription = Transcription {
                 id: Uuid::new_v4().to_string(),
                 timestamp,
-                text,
+                text: text.clone(),
                 source_node: node_id.clone(),
                 memo_device_id: None,
                 synced: false,
             };
 
+            // Store in database
             if let Err(e) = storage_clone.insert_transcription(&transcription) {
                 error!("Failed to store transcription: {}", e);
             } else {
                 info!("Stored transcription: {}", transcription.text);
-                let _ = ws_broadcast_tx_clone2.send(transcription);
+                let _ = ws_broadcast_tx_clone2.send(transcription.clone());
+
+                // Post to HTTPS endpoint if configured
+                if let Some(ref client) = http_client_clone {
+                    let transcription_clone = transcription.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client
+                            .post_transcription(
+                                &transcription_clone.id,
+                                transcription_clone.timestamp,
+                                &transcription_clone.text,
+                                &transcription_clone.source_node,
+                                transcription_clone.memo_device_id.as_deref(),
+                            )
+                            .await
+                        {
+                            // Log error but don't crash - HTTP failures shouldn't block transcription
+                            warn!("Failed to post transcription to HTTPS endpoint: {}", e);
+                        }
+                    });
+                }
             }
         }
     });

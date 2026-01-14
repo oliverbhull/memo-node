@@ -1,12 +1,12 @@
-use anyhow::Result;
-use std::path::PathBuf;
+use anyhow::{Context, Result};
+use memo_stt::SttEngine;
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
-/// Placeholder for Whisper transcription
-/// This will integrate with memo-stt once it's ready
+/// Whisper transcription using memo-stt
 pub struct WhisperTranscriber {
-    model_path: PathBuf,
+    engine: Arc<tokio::sync::Mutex<SttEngine>>,
     audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
     transcription_tx: mpsc::UnboundedSender<String>,
 }
@@ -14,26 +14,46 @@ pub struct WhisperTranscriber {
 impl WhisperTranscriber {
     pub fn new(
         model_name: &str,
+        threads: u32,
         audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
-    ) -> (Self, mpsc::UnboundedReceiver<String>) {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<String>)> {
         let (transcription_tx, transcription_rx) = mpsc::unbounded_channel();
 
-        // Determine model path
-        // In production, this would download/cache Whisper models
-        let model_path = PathBuf::from(format!("/path/to/models/{}.bin", model_name));
+        // Validate model name for Raspberry Pi (optimized for base.en and small.en)
+        validate_model_for_pi(model_name)?;
 
-        (
+        // Map config model names to memo-stt model paths
+        let model_path = map_model_name_to_path(model_name)?;
+
+        info!("Initializing Whisper engine with model: {} (configured for {} threads)", model_name, threads);
+        info!("Model path: {:?}", model_path);
+        // Note: Thread count configuration is available but memo-stt currently uses
+        // a fixed thread count internally. This setting is reserved for future use
+        // or if memo-stt adds thread configuration support.
+
+        // Create memo-stt engine
+        // memo-stt handles model downloading automatically
+        let engine = SttEngine::new(&model_path, 16000)
+            .context("Failed to create Whisper engine")?;
+
+        // Warm up the engine to reduce first-transcription latency
+        engine.warmup()
+            .context("Failed to warm up Whisper engine")?;
+
+        info!("Whisper engine initialized and warmed up");
+
+        Ok((
             Self {
-                model_path,
+                engine: Arc::new(tokio::sync::Mutex::new(engine)),
                 audio_rx,
                 transcription_tx,
             },
             transcription_rx,
-        )
+        ))
     }
 
     pub async fn start(mut self) -> Result<()> {
-        info!("Starting Whisper transcriber with model: {:?}", self.model_path);
+        info!("Starting Whisper transcriber");
 
         // Buffer to accumulate audio samples
         let mut audio_buffer: Vec<i16> = Vec::new();
@@ -53,6 +73,8 @@ impl WhisperTranscriber {
                             if let Err(e) = self.transcription_tx.send(text) {
                                 error!("Failed to send transcription: {}", e);
                             }
+                        } else {
+                            debug!("Transcription returned empty text");
                         }
                     }
                     Err(e) => {
@@ -69,41 +91,84 @@ impl WhisperTranscriber {
     }
 
     async fn transcribe_audio(&self, audio: &[i16]) -> Result<String> {
-        // PLACEHOLDER IMPLEMENTATION
-        // In production, this will:
-        // 1. Convert i16 samples to f32
-        // 2. Call memo-stt Whisper bindings
-        // 3. Return transcription text
-
-        // For now, return a placeholder
         debug!("Transcribing {} samples", audio.len());
 
-        // TODO: Integrate with memo-stt
-        // This is where we'll call the Rust Whisper bindings
-        // Example:
-        // let samples_f32: Vec<f32> = audio.iter().map(|&s| s as f32 / 32768.0).collect();
-        // let text = memo_stt::transcribe(&samples_f32, &self.model_path)?;
-
-        Ok("[Transcription placeholder - memo-stt integration pending]".to_string())
+        // memo-stt expects i16 samples directly, no conversion needed
+        // It handles normalization internally
+        let engine = self.engine.lock().await;
+        
+        engine.transcribe(audio)
+            .map_err(|e| anyhow::anyhow!("Transcription error: {}", e))
     }
 }
 
-/// Helper function to check if Whisper model exists
-pub fn ensure_model_downloaded(model_name: &str) -> Result<PathBuf> {
-    // TODO: Implement model download logic
-    // For now, just return expected path
-    let model_path = PathBuf::from(format!("/path/to/models/{}.bin", model_name));
-    Ok(model_path)
+/// Validate model name for Raspberry Pi optimization
+/// 
+/// Recommends base.en or small.en for Pi hardware, but allows other models
+/// with a warning. Full model filenames (containing .bin) are always allowed.
+fn validate_model_for_pi(model_name: &str) -> Result<()> {
+    // Allow full model filenames
+    if model_name.contains(".bin") {
+        // Warn if not a recommended model for Pi
+        if !model_name.contains("base") && !model_name.contains("small") && !model_name.contains("tiny") {
+            warn!(
+                "Model '{}' may be too large/slow for Raspberry Pi. Recommended: base.en or small.en",
+                model_name
+            );
+        }
+        return Ok(());
+    }
+
+    // For simple model names, validate
+    match model_name {
+        "base.en" | "small.en" | "tiny.en" => Ok(()),
+        _ => {
+            warn!(
+                "Model '{}' not optimized for Raspberry Pi. Recommended: base.en or small.en",
+                model_name
+            );
+            Ok(()) // Allow but warn
+        }
+    }
 }
+
+/// Map config model names to actual model file paths
+/// 
+/// Converts simple names like "base.en" to full model file paths
+/// that memo-stt can use. Models will be auto-downloaded if needed.
+fn map_model_name_to_path(model_name: &str) -> Result<String> {
+    // Map config model names to actual Whisper model file names
+    let model_file = match model_name {
+        "base.en" => "ggml-base.en.bin",
+        "small.en" => "ggml-small.en-q5_1.bin", // Default model
+        "tiny.en" => "ggml-tiny.en.bin",
+        // If it's already a full model name, use it as-is
+        name if name.contains(".bin") => name,
+        // Otherwise, assume it's a model name and add prefix
+        name => {
+            warn!("Unknown model name '{}', using as-is. Expected: base.en, small.en, or full model filename", name);
+            if name.ends_with(".bin") {
+                name
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid model name: {}. Use 'base.en', 'small.en', or a full model filename",
+                    name
+                ));
+            }
+        }
+    };
+
+    Ok(model_file.to_string())
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_transcriber_creation() {
-        let (_audio_tx, audio_rx) = mpsc::unbounded_channel();
-        let (transcriber, _transcription_rx) = WhisperTranscriber::new("base.en", audio_rx);
-        assert!(transcriber.model_path.to_string_lossy().contains("base.en"));
+    #[test]
+    fn test_model_name_mapping() {
+        assert_eq!(map_model_name_to_path("base.en").unwrap(), "ggml-base.en.bin");
+        assert_eq!(map_model_name_to_path("small.en").unwrap(), "ggml-small.en-q5_1.bin");
     }
 }

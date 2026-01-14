@@ -26,6 +26,12 @@ pub struct AudioConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TranscriptionConfig {
     pub model: String,
+    #[serde(default = "default_threads")]
+    pub threads: u32,
+}
+
+fn default_threads() -> u32 {
+    4
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,6 +49,8 @@ pub struct SyncConfig {
 pub struct ApiConfig {
     pub websocket_port: u16,
     pub listen_address: String,
+    #[serde(default)]
+    pub https_endpoint: Option<String>,
 }
 
 impl Config {

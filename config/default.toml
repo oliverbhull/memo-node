@@ -5,15 +5,16 @@
 id = "memo-node"
 
 [audio]
-# BLE service UUID for Memo devices
-# TODO: Replace with actual Memo device UUID
-memo_service_uuid = "00000000-0000-0000-0000-000000000000"
-memo_characteristic_uuid = "00000000-0000-0000-0000-000000000001"
+# BLE service UUID for Memo devices (matches memo-stt)
+memo_service_uuid = "1234A000-1234-5678-1234-56789ABCDEF0"
+memo_characteristic_uuid = "1234A001-1234-5678-1234-56789ABCDEF0"
 
 [transcription]
-# Whisper model size: tiny.en, base.en, small.en, medium.en, large
-# Use tiny.en or base.en for Raspberry Pi, base.en or small.en for MacBook
+# Whisper model size: base.en, small.en (optimized for Raspberry Pi)
+# Use base.en for good balance, small.en for higher accuracy
 model = "base.en"
+# Number of threads for Whisper transcription (4-6 recommended for Pi)
+threads = 4
 
 [storage]
 # Storage path (use ~ for home directory, will be expanded)
@@ -30,3 +31,6 @@ sync_interval = 30
 websocket_port = 9877
 # Listen address
 listen_address = "127.0.0.1"
+# Optional HTTPS endpoint URL for posting transcriptions
+# Leave empty to disable HTTPS posting
+https_endpoint = ""

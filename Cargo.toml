@@ -25,6 +25,12 @@ btleplug = "0.11"
 # Audio decoding
 opus = "0.3"
 
+# Speech-to-text
+memo-stt = { path = "../memo-stt" }
+
+# HTTP client for HTTPS posting
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
 rusqlite_migration = "1.1"
