@@ -121,7 +121,7 @@ threads = 4
 [api]
 # Optional: Set your HTTPS endpoint URL here
 # Leave empty to disable HTTPS posting
-https_endpoint = ""
+https_endpoint = "http://localhost:6969"
 # Example: https_endpoint = "https://api.example.com/transcriptions"
 
 [storage]
